@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit
 from scipy import ndimage, stats
+from tqdm import tqdm
 from scipy.optimize import minimize
 
 
@@ -21,8 +22,6 @@ def ransac(features, degree, sigma, N, T=31, alpha=0.95):
 
     See Multiple View Geometry in Computer Vision Chapter 4.7
 
-    TODO: use analytical solution to fit the polynomial
-
     Args:
         features (np.ndarray): shape (n, 2)
         degree (int): the degree of the polynomial fit
@@ -30,6 +29,11 @@ def ransac(features, degree, sigma, N, T=31, alpha=0.95):
         N (int): number of repeats
         T (int): the targeted support size
         alpha (float): the confidence level of the chi2 distribution
+
+    Return:
+        np.ndarray: features selected by the RANSAC algorithm, the fitting
+            result should be estimated using `np.polyfit` with these features
+            (the shape is n, 2)
     """
     nf = features.shape[0]
     t2 = stats.chi2.ppf(alpha, df=1) * sigma**2
@@ -37,8 +41,12 @@ def ransac(features, degree, sigma, N, T=31, alpha=0.95):
     for trail_idx in tqdm(range(N)):
         Si = []
         while len(Si) < T:
-            S = features[np.random.randint(0, nf, degree)]
-            par = np.polyfit(*S.T, degree)
+            x, y = features[np.random.randint(0, nf, degree)].T
+            # the shape of x_poly is (n_degree, n_sample),
+            #     but where n_degree == n_sample
+            x_poly = x[np.newaxis, :] ** np.arange(degree + 1)[:, np.newaxis]
+            par = np.linalg.pinv(x_poly @ x_poly.T) @ x_poly @ y
+            par = par[::-1]
             dists = [
                 minimize(
                     fun=lambda a, x, y: (a - x)**2 + (y - np.polyval(par, x))**2,
@@ -49,7 +57,7 @@ def ransac(features, degree, sigma, N, T=31, alpha=0.95):
             Si = features[dists < t2]
         Si_ensemble.append(Si)
     Si_counts = [len(s) for s in Si_ensemble]
-    return Si_ensemble[np.argmax(Si_counts)
+    return Si_ensemble[np.argmax(Si_counts)]
 
 
 @njit
