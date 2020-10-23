@@ -1,5 +1,6 @@
 **/tags
-.*
+**/*.pdf
 **/__pycache__
 **/*.pyc
+.*
 !.gitignore
