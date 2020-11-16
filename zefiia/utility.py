@@ -38,26 +38,29 @@ def ransac(features, degree, sigma, N, T=31, alpha=0.95):
     nf = features.shape[0]
     t2 = stats.chi2.ppf(alpha, df=1) * sigma**2
     Si_ensemble = []
+    f_norm = features / features.std(axis=0)[np.newaxis, :]
+
     for trail_idx in tqdm(range(N)):
         Si = []
         while len(Si) < T:
-            x, y = features[np.random.randint(0, nf, degree)].T
+            x, y = f_norm[np.random.randint(0, nf, degree)].T
             # the shape of x_poly is (n_degree, n_sample),
             #     but where n_degree == n_sample
             x_poly = x[np.newaxis, :] ** np.arange(degree + 1)[:, np.newaxis]
             par = np.linalg.pinv(x_poly @ x_poly.T) @ x_poly @ y
             par = par[::-1]
-            dists = [
+            dists = np.array([
                 minimize(
                     fun=lambda a, x, y: (a - x)**2 + (y - np.polyval(par, x))**2,
                     x0=0,
                     args=(f[0], f[1])
-                ).fun for f in features
-            ]
-            Si = features[dists < t2]
+                ).fun for f in f_norm
+            ])  # revert back to the origional unit
+            Si = np.where(dists < t2)[0]
         Si_ensemble.append(Si)
     Si_counts = [len(s) for s in Si_ensemble]
-    return Si_ensemble[np.argmax(Si_counts)]
+    chosen = Si_ensemble[np.argmax(Si_counts)]
+    return features[chosen]
 
 
 @njit
@@ -246,3 +249,40 @@ def get_poly_profile(image, src, dst, poly_par, size):
         method=lambda x, axis: x
     )
     return profile
+
+
+def get_pca_angle(image, threshold, weight=True, max_points=1000):
+    """
+    Getting the rotate angle to rotate the main feature in the image
+        so that its main component axis align with the x-axis
+
+    Args:
+        image (np.ndarray): a 2D image
+        threshold (float): the percentage threshold value, the pixles whose
+            intensity is below.
+        weight (bool): if true, weight the pixels in the image according to
+            their intensities/brightness.
+        max_points (int): the maximum points used to calculate the covariance
+            matrix.
+    """
+    points = np.array(np.where(
+        image > image.max() * threshold
+    )).astype(float)  # shape (2, n)
+    dim, n = points.shape
+    if n > max_points:
+        indices = np.arange(n)
+        np.random.shuffle(indices)
+        indices = indices[:max_points]
+    else:
+        indices = np.arange(n)
+    if weight: 
+        weight = image[image > image.max() * threshold][indices]
+    else:
+        weight = np.ones(n)
+    points = points[:, indices]
+    mu = np.mean(points, axis=1)
+    points -= mu[:, None]
+    cov = points @ np.diag(weight) @ points.T / np.sum(weight)
+    u, s, vh = np.linalg.svd(cov)
+    return np.arcsin(u[0][0]) / np.pi * 180
+
