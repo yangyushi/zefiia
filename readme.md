@@ -8,6 +8,14 @@ This is a collection of python scripts that I developed for analysing the x-ray 
 
 ## How to use the code
 
+The easiest way would be
+
+```py
+pip install git+https://github.com/yangyushi/zefiia.git
+```
+
+Alternatively, you can go through the following steps.
+
 1. Clone or download this repository to your own device.
 2. Open a terminal/cmd/whatever, and navigate to the folder of the repository
 3. execute the following command
