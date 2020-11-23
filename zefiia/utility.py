@@ -1,11 +1,14 @@
-import matplotlib.pyplot as plt
+import copy
 import numpy as np
-from numba import njit
-from scipy import ndimage, stats
 from tqdm import tqdm
-from scipy.optimize import minimize
+from numba import njit
+import matplotlib.cm as cm
+import matplotlib.pyplot as plt
+from scipy import ndimage, stats
 from sklearn.cluster import DBSCAN
+from scipy.optimize import minimize
 from scipy.signal import fftconvolve
+from joblib import Parallel, delayed
 
 
 def ransac(
@@ -52,7 +55,7 @@ def ransac(
     else:
         to_iter = range(N)
 
-    for trail_idx in to_iter:
+    for iter_idx in to_iter:
         Si = []
         count = 0
         while len(Si) < T:
@@ -74,6 +77,74 @@ def ransac(
             if count == max_iter:
                 break
         Si_ensemble.append(Si)
+    Si_counts = [len(s) for s in Si_ensemble]
+    chosen = Si_ensemble[np.argmax(Si_counts)]
+    return features[chosen]
+
+
+def ransac_step(N, T, alpha, max_iter, f_norm, nf, t2, degree):
+    """
+    a single step for the ransac algorithm, exclusively designed for ransac_mp
+    """
+    Si = []
+    count = 0
+    while len(Si) < T:
+        x, y = f_norm[np.random.randint(0, nf, degree)].T
+        # the shape of x_poly is (n_degree, n_sample),
+        #     but where n_degree == n_sample
+        x_poly = x[np.newaxis, :] ** np.arange(degree + 1)[:, np.newaxis]
+        par = np.linalg.pinv(x_poly @ x_poly.T) @ x_poly @ y
+        par = par[::-1]
+        dists = np.array([
+            minimize(
+                fun=lambda a, x, y: (a - x)**2 + (y - np.polyval(par, x))**2,
+                x0=0,
+                args=(f[0], f[1])
+            ).fun for f in f_norm
+        ])  # revert back to the origional unit
+        Si = np.where(dists < t2)[0]
+        count += 1
+        if count == max_iter:
+            break
+    return Si
+
+
+def ransac_mp(
+        features, degree, sigma, N, T, n_jobs=4,
+        alpha=0.95, max_iter=100, report=False
+    ):
+    """
+    Use RANSAC algorithm to estimate a polynomial fit
+        for a set of 2D points using multiple processors
+
+    Args:
+        features (np.ndarray): shape (n, 2)
+        degree (int): the degree of the polynomial fit
+        sigma (float): the sigma of the gaussian distribution of the error
+        N (int): number of repeats
+        T (int): the targeted support size
+        alpha (float): the confidence level of the chi2 distribution
+
+    Return:
+        np.ndarray: features selected by the RANSAC algorithm, the fitting
+            result should be estimated using `np.polyfit` with these features
+            (the shape is n, 2)
+    """
+    nf = features.shape[0]
+    scale = features.std(axis=0).max()
+    t2 = stats.chi2.ppf(alpha, df=1) * (sigma / scale)**2
+    f_norm = features / scale
+
+    if report:
+        to_iter = tqdm(range(N))
+    else:
+        to_iter = range(N)
+
+    Si_ensemble = Parallel(n_jobs=n_jobs)(
+        delayed(ransac_step)(
+            N, T, alpha, max_iter, f_norm, nf, t2, degree
+        ) for iter_idx in to_iter
+    )
     Si_counts = [len(s) for s in Si_ensemble]
     chosen = Si_ensemble[np.argmax(Si_counts)]
     return features[chosen]
@@ -521,7 +592,7 @@ def get_maxima(image, size, threshold='mean'):
 
 def get_spine_features(
         image, size, degree, sigma=0.5, N=50, optimise_cycle=10,
-        report=True, see_cc=False, see_features=False
+        n_jobs=1, report=True, see_cc=False, see_features=False
     ):
     """
     Get the coordinates corresponding the spine inside the fish
@@ -544,9 +615,16 @@ def get_spine_features(
         plt.scatter(*xy, color='teal', marker='+')
         plt.axis('off')
         plt.show()
-    spine_features_xy = ransac(
-        xy.T, degree=degree, sigma=sigma, N=N, T=maxima.shape[1]//2, report=report
-    ).T
+    if n_jobs == 1:
+        spine_features_xy = ransac(
+            xy.T, degree=degree, sigma=sigma, N=N,
+            T=maxima.shape[1]//2, report=report
+        ).T
+    else:
+        spine_features_xy = ransac_mp(
+            xy.T, degree=degree, sigma=sigma, N=N,
+            T=maxima.shape[1]//2, report=report, n_jobs=n_jobs
+        ).T
     history_opt = [spine_features_xy]
     history_cost = [get_feature_cost(
         image, spine_features_xy, size=win_size, deg=degree
@@ -581,8 +659,9 @@ def get_spine_from_features(image, features, size, degree, blur=2, threshold=2):
     Generate a mask image just for the spine from spine features
     """
     src, dst, poly_par = get_poly_parameters(features, axis=0, degree=degree)
+    win_size=size * 4 + 1
     prof_2d = get_feature_profile(
-        image, features, size=size*4+1, deg=degree
+        image, features, size=win_size, deg=degree
     )
     h_centre = prof_2d.shape[1]//2
     centre_mask = np.zeros(prof_2d.shape)
@@ -593,9 +672,35 @@ def get_spine_from_features(image, features, size, degree, blur=2, threshold=2):
     prof_weighted = centre_mask * prof_2d * lap
     prof_mask = prof_weighted > prof_weighted.std() * threshold
     positions = np.array(np.where(prof_mask > 0))
-    pos_rec = remap(positions, image, src, dst, poly_par, linewidth=size*4+1)
+    pos_rec = remap(positions, image, src, dst, poly_par, linewidth=win_size)
     pos_rec = np.flip(pos_rec, axis=0)
     mask_spine = np.zeros(image.shape, dtype=np.uint8)
     mask_spine[tuple(pos_rec.astype(int))] = 1
     mask_spine = ndimage.binary_closing(mask_spine)
     return mask_spine
+
+
+def imshow_with_mask(image, mask, cmap_img='gray', cmap_mask='magma', figsize=(6, 4)):
+    """
+    Overlap a binary mask on an image and show them with matplotlib.imshow.
+
+    Args:
+        image (np.ndarray): a 2D image
+        mask (np.ndarray): a binary mask, with background value assigned to 0
+        cmap_img (str): the name of the colourmap for the image
+        cmap_mask (str): the name of the colourmap for the mask, the central
+            colours will be taken to plot the mask.
+        figsize (tuple): the size of the output figure in inches
+
+    Return:
+        None
+    """
+    my_cmap = eval(f'cm.{cmap_mask}')
+    my_cmap = copy.copy(my_cmap) # do not modify default cmap
+    my_cmap.set_under('k', alpha=0)
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot()
+    ax.imshow(image, cmap=cmap_img)
+    ax.imshow(mask, cmap=my_cmap, clim=[0.1, 2], interpolation='none')
+    plt.axis('off')
+    plt.show()
