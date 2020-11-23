@@ -23,7 +23,8 @@ setup(
     packages=["zefiia"],
     package_dir={'zefiia': 'zefiia'},
     install_requires=[
-        'numpy', 'scipy', 'scikit_posthocs', 'numba', 'tqdm'
+        'numpy', 'scipy', 'scikit_posthocs', 'matplotlib',
+        'numba', 'tqdm', 'scikit-learn', 'joblib'
     ],
     python_requires='>=3.5'
 )
