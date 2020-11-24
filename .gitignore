@@ -1,5 +1,6 @@
 **/tags
 **/*.pdf
+**/*.png
 **/__pycache__
 **/*.pyc
 .*
